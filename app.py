@@ -7,16 +7,26 @@ from pdf2image import convert_from_bytes
 import re
 from datetime import datetime
 
+# Optional Google Vision (safe)
+try:
+    from google.cloud import vision
+    GOOGLE_AVAILABLE = True
+except:
+    GOOGLE_AVAILABLE = False
+
+
+# -------------------- UI --------------------
+st.set_page_config(page_title="Medical Notice Verifier", layout="centered")
 st.title("🏥 Student Medical Notice Verifier")
 
-mode = st.radio(
-    "Choose input method:",
-    ("Upload File", "Scan Using Camera")
+st.write("Upload a medical notice (PDF / Image) to verify its authenticity.")
+
+uploaded_file = st.file_uploader(
+    "📤 Upload Medical Notice",
+    type=["jpg", "png", "pdf"]
 )
 
-
-
-
+# -------------------- FUNCTIONS --------------------
 def preprocess_image(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -24,8 +34,33 @@ def preprocess_image(img):
     return thresh
 
 
-def extract_text_from_image(image):
-    return pytesseract.image_to_string(image)
+def extract_text_google(image_np):
+    try:
+        client = vision.ImageAnnotatorClient()
+        _, encoded = cv2.imencode(".png", image_np)
+        content = encoded.tobytes()
+        image = vision.Image(content=content)
+        response = client.text_detection(image=image)
+
+        if response.text_annotations:
+            return response.text_annotations[0].description, "Google Vision API"
+    except:
+        pass
+
+    return None, None
+
+
+def extract_text_tesseract(image_np):
+    return pytesseract.image_to_string(image_np), "Tesseract OCR"
+
+
+def extract_text(image_np):
+    if GOOGLE_AVAILABLE:
+        text, engine = extract_text_google(image_np)
+        if text:
+            return text, engine
+
+    return extract_text_tesseract(image_np)
 
 
 def basic_validation(text):
@@ -55,7 +90,7 @@ def basic_validation(text):
                 score += 1
             else:
                 reasons.append("Date is in the future")
-        except:
+        except ValueError:
             reasons.append("Invalid date format")
     else:
         reasons.append("Date not found")
@@ -63,43 +98,29 @@ def basic_validation(text):
     return score, reasons
 
 
+# -------------------- PROCESSING --------------------
 image_np = None
 
-# ===== UPLOAD MODE =====
-if mode == "Upload File":
-    uploaded_file = st.file_uploader(
-        "Upload a medical notice (JPG, PNG, or PDF)",
-        type=["jpg", "png", "pdf"]
-    )
+if uploaded_file:
+    if uploaded_file.type == "application/pdf":
+        images = convert_from_bytes(uploaded_file.read())
+        image_np = np.array(images[0])
+    else:
+        image_np = np.array(Image.open(uploaded_file))
 
-    if uploaded_file:
-        if uploaded_file.type == "application/pdf":
-            images = convert_from_bytes(uploaded_file.read())
-            image_np = np.array(images[0])
-        else:
-            image_np = np.array(Image.open(uploaded_file))
-
-
-# ===== CAMERA MODE =====
-elif mode == "Scan Using Camera":
-    camera_image = st.camera_input("Take a photo of the medical notice")
-
-    if camera_image:
-        image = Image.open(camera_image)
-        image_np = np.array(image)
-
-
-# ===== COMMON PROCESSING =====
 if image_np is not None:
     processed = preprocess_image(image_np)
-    text = extract_text_from_image(processed)
+    text, engine = extract_text(processed)
+
+    st.subheader("🔍 OCR Engine Used")
+    st.info(engine)
 
     st.subheader("📄 Extracted Text")
     st.text(text)
 
     score, reasons = basic_validation(text)
 
-    st.subheader("✅ Result")
+    st.subheader("✅ Verification Result")
     if score >= 3:
         st.success("✔ Acceptable for Academic Use")
     elif score == 2:
@@ -108,7 +129,7 @@ if image_np is not None:
         st.error("❌ Likely Invalid")
 
     if reasons:
-        st.subheader("⚠ Issues")
+        st.subheader("⚠ Issues Found")
         for r in reasons:
             st.write("- ", r)
 
